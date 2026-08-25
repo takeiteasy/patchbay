@@ -3,7 +3,7 @@
 -behaviour(gen_server).
 
 %% Client API
--export([start_link/2, call_service/2, cast/2]).
+-export([start_link/2, call_service/2, call_service/3, cast/2]).
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
          terminate/2, code_change/3]).
@@ -67,6 +67,19 @@ start_link(Mod, Args) ->
 call_service(Name, Msg) ->
     case patchbay_registry:lookup(Name) of
         {ok, {Pid, _Props}} -> gen_server:call(Pid, {msg, Msg});
+        {error, not_found} -> {error, not_found}
+    end.
+
+%% Timeout variant: tools like a shell plugin routinely run longer than
+%% gen_server's 5s default. On timeout the caller gets {error, timeout}
+%% (the standard exit reason is converted here so callers don't need to
+%% catch); note the target process keeps running whatever it was doing.
+call_service(Name, Msg, Timeout) ->
+    case patchbay_registry:lookup(Name) of
+        {ok, {Pid, _Props}} ->
+            try gen_server:call(Pid, {msg, Msg}, Timeout)
+            catch exit:{timeout, _} -> {error, timeout}
+            end;
         {error, not_found} -> {error, not_found}
     end.
 

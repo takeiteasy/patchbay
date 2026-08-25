@@ -95,7 +95,11 @@ it with `(patchbay_context:mount ctx (your-module:child_spec Args))`.
 
 `(patchbay_service:call_service name msg)` and `(patchbay_service:cast name
 msg)` look the plugin up by name in the registry and forward to its
-`handle_message/2`. There's no general topic-based event bus yet -- the
+`handle_message/2`. For plugins that legitimately run longer than
+gen_server's 5s default (a shell tool, a long evaluation),
+`(patchbay_service:call_service name msg timeout-ms)` bounds the wait and
+returns `#(error timeout)` instead of raising; the plugin keeps running
+either way. There's no general topic-based event bus yet -- the
 registry's subscribe/notify already covers what the demo plugin needs, and
 a real bus is better designed once there's a second consumer for it.
 

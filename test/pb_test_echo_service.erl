@@ -19,6 +19,9 @@ init([]) ->
 
 handle_message({echo, Msg}, State) ->
     {reply, {ok, Msg}, State};
+handle_message({sleep, Ms}, State) when is_integer(Ms), Ms >= 0 ->
+    timer:sleep(Ms),
+    {reply, {ok, slept}, State};
 handle_message(_Msg, State) ->
     {reply, {error, bad_message}, State}.
 
