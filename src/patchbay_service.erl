@@ -16,6 +16,7 @@
 %%   service_name()               -> atom                    [required]
 %%   dependencies()               -> [atom()]                [required]
 %%   init(Args)                   -> {ok, State}             [required]
+%%   metadata()                   -> map()                    [optional]
 %%   ready(Deps, State)           -> {ok, State}              [optional]
 %%   dep_down(Name, Reason, State)-> {ok, State}              [optional]
 %%   handle_message(Msg, State)   -> {ok, State} | {reply, R, State}
@@ -24,7 +25,10 @@
 %%
 %% Missing optional callbacks default to no-ops, checked with
 %% erlang:function_exported/3 so a trivial plugin only writes
-%% service_name, dependencies, and init.
+%% service_name, dependencies, and init. metadata/0 is published as the
+%% registration's props (see patchbay_registry), which is how tool
+%% plugins advertise themselves for discovery -- e.g.
+%% #{kind => tool, summary => "...", params => #{...}}.
 %%
 %% Dependency waiting: init/1 subscribes to every declared dependency
 %% via patchbay_registry:subscribe/1 and does NOT call lookup first --
@@ -47,6 +51,7 @@
 -callback service_name() -> atom().
 -callback dependencies() -> [atom()].
 -callback init(Args :: term()) -> {ok, State :: term()}.
+-callback metadata() -> Props :: map().
 -callback ready(Deps :: #{atom() => pid()}, State :: term()) ->
     {ok, State :: term()}.
 -callback dep_down(Name :: atom(), Reason :: term(), State :: term()) ->
@@ -55,7 +60,8 @@
     {ok, State :: term()} | {reply, Reply :: term(), State :: term()}.
 -callback terminate(Reason :: term(), State :: term()) -> ok.
 
--optional_callbacks([ready/2, dep_down/3, handle_message/2, terminate/2]).
+-optional_callbacks([metadata/0, ready/2, dep_down/3, handle_message/2,
+                     terminate/2]).
 
 %% ------------------------------------------------------------------
 %% Client API
@@ -107,7 +113,7 @@ init({Mod, Args}) ->
     {ok, CbState0} = Mod:init(Args),
     State0 = #service{mod = Mod, name = Name, deps = Deps,
                       ready = #{}, status = waiting, cbstate = CbState0},
-    patchbay_registry:register(Name, self(), #{}),
+    patchbay_registry:register(Name, self(), call_metadata(Mod)),
     %% Subscribing (not looking up) is what makes this race-free: a
     %% dependency already registered is replayed to us immediately by
     %% the registry, so the zero-deps and already-satisfied-deps cases
@@ -201,6 +207,18 @@ transition_dep_down(DepName, Reason, State) ->
 %% ------------------------------------------------------------------
 %% optional-callback dispatch
 %% ------------------------------------------------------------------
+
+call_metadata(Mod) ->
+    case erlang:function_exported(Mod, metadata, 0) of
+        true ->
+            %% Mod:metadata() is not guard-legal, so validate in the body:
+            case is_map(Mod:metadata()) of
+                true -> Mod:metadata();
+                false -> erlang:error({bad_metadata, Mod})
+            end;
+        false ->
+            #{}
+    end.
 
 call_ready(Mod, Deps, CbState) ->
     case erlang:function_exported(Mod, ready, 2) of

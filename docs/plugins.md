@@ -17,11 +17,18 @@ and `erlang:apply/3`, so all it ever sees is module + function atoms.
 service_name()                -> atom                            [required]
 dependencies()                -> [atom()]                        [required]
 init(Args)                    -> {ok, State}                     [required]
+metadata()                    -> map()                           [optional]
 ready(Deps, State)            -> {ok, State}                     [optional]
 dep_down(Name, Reason, State) -> {ok, State}                     [optional]
 handle_message(Msg, State)    -> {ok, State} | {reply, R, State} [optional]
 terminate(Reason, State)      -> ok                              [optional]
 ```
+
+`metadata/0` is published as the registration's props (see
+`patchbay_registry:register/3`), which is how plugin *families* advertise
+themselves for discovery -- nyaa's tool/skill plugins use it to publish
+`#{kind => tool, summary => ..., params => #{...}}` so callers can find
+every tool by scanning registrations for `kind == tool`.
 
 Optional callbacks default to no-ops, checked with
 `erlang:function_exported/3` -- a trivial plugin with no dependencies only
