@@ -10,6 +10,7 @@
          terminate/2, code_change/3]).
 
 -define(SERVER, patchbay_registry).
+-define(BACKUP_TAB, patchbay_registry_backup).
 
 %% The service registry: the piece that lets a plugin be mounted before
 %% its dependency exists, and be told about it when it appears.
@@ -37,10 +38,28 @@
 %% client gave up would still find a stale `From` sitting in `waiters`
 %% forever, and the server would try to reply into a caller that's no
 %% longer listening. Client calls are made with `infinity` -- the
-%% server-side timer is what actually bounds the wait.
+%% server-side timer is what actually bounds the wait. `await(Name,
+%% infinity)` is supported and means exactly that: park until the name
+%% registers, with no deadline.
 %%
 %% The state is deliberately a plain map (not a record) with one key per
 %% index; the tests inspect it directly via sys:get_state/1.
+%%
+%% Crash recovery: the registry writes every registration and
+%% subscription through to a public ETS table `patchbay_registry_backup`
+%% that is owned by patchbay_sup, so it survives a one_for_one restart
+%% of the registry process itself. On init the fresh instance rebuilds
+%% its indexes from that table: entries whose pid died while the
+%% registry was down are pruned and their subscribers are sent an
+%% `unregistered' notification with reason `noproc', while surviving
+%% pids get fresh monitors. Scope: this makes the registry resilient to
+%% ITS OWN crashes only. The table dies with the supervisor (i.e. with
+%% the application), which is correct -- pids recorded in it are
+%% meaningless after an application or VM restart. In-flight `await'
+%% waiters are likewise not persisted; their callers fail when the
+%% registry process dies (standard gen_server call semantics). A bare
+%% start_link/0 without the supervisor around creates a fallback table
+%% owned by the registry process itself, degrading to no recovery.
 
 %% ------------------------------------------------------------------
 %% Client API
@@ -58,8 +77,11 @@ unregister(Name) ->
 lookup(Name) ->
     gen_server:call(?SERVER, {lookup, Name}).
 
-await(Name, Timeout) ->
-    gen_server:call(?SERVER, {await, Name, Timeout}, infinity).
+await(Name, Timeout) when Timeout =:= infinity;
+                          is_integer(Timeout), Timeout >= 0 ->
+    gen_server:call(?SERVER, {await, Name, Timeout}, infinity);
+await(_Name, Timeout) ->
+    erlang:error(badarg, [Timeout]).
 
 subscribe(Name) ->
     gen_server:call(?SERVER, {subscribe, Name, self()}).
@@ -75,7 +97,19 @@ names() ->
 %% ------------------------------------------------------------------
 
 init([]) ->
-    {ok, new_state()}.
+    ensure_backup_table(),
+    {State1, DeadNames} = restore_registrations(new_state()),
+    State2 = restore_subscriptions(State1),
+    %% Subscribers are restored by now, so pruned registrations can
+    %% reach everyone who still cares -- mirroring what the DOWN would
+    %% have delivered had the registry been alive when the pid died.
+    State3 = lists:foldl(
+               fun(Name, Acc) ->
+                       notify_subs(Name, {?SERVER, unregistered, Name,
+                                          noproc},
+                                   Acc)
+               end, State2, DeadNames),
+    {ok, State3}.
 
 handle_call({register, Name, Pid, Props}, _From, State) ->
     do_register(Name, Pid, Props, State);
@@ -138,6 +172,83 @@ sget(State, Key) -> maps:get(Key, State).
 sput(State, Key, Val) -> maps:put(Key, Val, State).
 
 %% ------------------------------------------------------------------
+%% backup table -- write-through state for crash recovery
+%% ------------------------------------------------------------------
+%%
+%% Row shapes mirror the two durable parts of the state:
+%%   {{reg, Name}, {Pid, Props}}
+%%   {{sub, Name}, sets:set(Pid)}
+%% Everything else (monitors, waiters) is rebuilt or deliberately
+%% dropped at init; see the module header.
+
+ensure_backup_table() ->
+    case ets:whereis(?BACKUP_TAB) of
+        undefined ->
+            %% Degraded bare-mode fallback: owned by this process, so it
+            %% dies with us and a restart starts empty. patchbay_sup
+            %% normally owns the table and outlives registry crashes.
+            ets:new(?BACKUP_TAB, [named_table, public, set]);
+        _Tab ->
+            ok
+    end.
+
+backup_put_reg(Name, Pid, Props) ->
+    true = ets:insert(?BACKUP_TAB, {{reg, Name}, {Pid, Props}}),
+    ok.
+
+backup_del_reg(Name) ->
+    true = ets:delete(?BACKUP_TAB, {reg, Name}),
+    ok.
+
+backup_put_sub(Name, PidsSet) ->
+    true = ets:insert(?BACKUP_TAB, {{sub, Name}, PidsSet}),
+    ok.
+
+backup_del_sub(Name) ->
+    true = ets:delete(?BACKUP_TAB, {sub, Name}),
+    ok.
+
+restore_registrations(State) ->
+    Rows = ets:match_object(?BACKUP_TAB, {{reg, '$1'}, '$2'}),
+    lists:foldl(
+      fun({{reg, Name}, {Pid, Props}}, {Acc, Dead}) ->
+              case erlang:is_process_alive(Pid) of
+                  true ->
+                      Mon = erlang:monitor(process, Pid),
+                      Acc1 = sput(sput(sput(Acc,
+                                           regs,
+                                           maps:put(Name, {Pid, Props},
+                                                    sget(Acc, regs))),
+                                      reg_mon,
+                                      maps:put(Name, Mon,
+                                               sget(Acc, reg_mon))),
+                                 mon_reg,
+                                 maps:put(Mon, Name, sget(Acc, mon_reg))),
+                      {Acc1, Dead};
+                  false ->
+                      backup_del_reg(Name),
+                      {Acc, [Name | Dead]}
+              end
+      end, {State, []}, Rows).
+
+restore_subscriptions(State0) ->
+    Rows = ets:match_object(?BACKUP_TAB, {{sub, '$1'}, '$2'}),
+    lists:foldl(
+      fun({{sub, Name}, PidsSet}, Acc) ->
+              Live = sets:filter(fun erlang:is_process_alive/1, PidsSet),
+              case sets:size(Live) of
+                  0 ->
+                      backup_del_sub(Name),
+                      Acc;
+                  _ ->
+                      backup_put_sub(Name, Live),
+                      Acc1 = sput(Acc, subs,
+                                  maps:put(Name, Live, sget(Acc, subs))),
+                      sets:fold(fun ensure_sub_monitor/2, Acc1, Live)
+              end
+      end, State0, Rows).
+
+%% ------------------------------------------------------------------
 %% register / unregister / lookup
 %% ------------------------------------------------------------------
 
@@ -175,6 +286,7 @@ do_register_fresh(Name, Pid, Props, State0) ->
                   mon_reg, maps:put(Mon, Name, sget(State1, mon_reg))),
     State3 = reply_waiters(Name, Pid, State2),
     State4 = notify_subs(Name, {?SERVER, registered, Name, Pid}, State3),
+    ok = backup_put_reg(Name, Pid, Props),
     {reply, ok, State4}.
 
 do_unregister(Name, Reason, State) ->
@@ -192,6 +304,7 @@ do_unregister(Name, Reason, State) ->
 drop_registration(Name, State0) ->
     Mon = maps:get(Name, sget(State0, reg_mon), undefined),
     undefined =/= Mon andalso erlang:demonitor(Mon, [flush]),
+    ok = backup_del_reg(Name),
     State1 = sput(State0, regs, maps:remove(Name, sget(State0, regs))),
     State2 = sput(State1, reg_mon, maps:remove(Name, sget(State1, reg_mon))),
     sput(State2, mon_reg,
@@ -215,7 +328,16 @@ do_await(Name, Timeout, From, State) ->
         {ok, {Pid, _Props}} ->
             {reply, {ok, Pid}, State};
         error ->
-            TimerRef = erlang:start_timer(Timeout, self(), timeout),
+            %% `infinity' means "no server-side deadline": no timer is
+            %% started, so a caller waiting on a name that never
+            %% registers waits forever. Non-negative integers go to
+            %% start_timer; anything else is rejected by the guard on
+            %% the client-side await/2, so it raises badarg in the
+            %% CALLER and never reaches (or kills) this server.
+            TimerRef = case Timeout of
+                           infinity -> undefined;
+                           T -> erlang:start_timer(T, self(), timeout)
+                       end,
             {CallerPid, _Tag} = From,
             CallerMon = erlang:monitor(process, CallerPid),
             Entry = {From, TimerRef, CallerMon},
@@ -237,7 +359,7 @@ reply_waiters(Name, Pid, State0) ->
     Entries = maps:get(Name, sget(State0, waiters), []),
     lists:foldl(
       fun({From, TimerRef, CallerMon}, Acc) ->
-              erlang:cancel_timer(TimerRef),
+              cancel_waiter_timer(TimerRef),
               erlang:demonitor(CallerMon, [flush]),
               gen_server:reply(From, {ok, Pid}),
               sput(sput(Acc,
@@ -258,6 +380,11 @@ handle_waiter_timeout(TimerRef, State) ->
             {noreply, drop_waiter(Name, From, TimerRef, State)}
     end.
 
+cancel_waiter_timer(undefined) ->
+    ok;
+cancel_waiter_timer(TimerRef) ->
+    erlang:cancel_timer(TimerRef).
+
 drop_waiter(Name, From, TimerRef, State0) ->
     Waiters = maps:get(Name, sget(State0, waiters), []),
     Remaining = [E || E = {F, _, _} <- Waiters, F =/= From],
@@ -271,7 +398,8 @@ drop_waiter(Name, From, TimerRef, State0) ->
     State2 = sput(State1, timer_waiter,
                   maps:remove(TimerRef, sget(State1, timer_waiter))),
     lists:foldl(
-      fun({_F, _TRef, CallerMon}, Acc) ->
+      fun({_F, TRef, CallerMon}, Acc) ->
+              cancel_waiter_timer(TRef),
               erlang:demonitor(CallerMon, [flush]),
               sput(Acc, callermon_waiter,
                    maps:remove(CallerMon, sget(Acc, callermon_waiter)))
@@ -288,9 +416,10 @@ do_subscribe(Name, Pid, State0) ->
             true ->
                 State0;
             false ->
+                Updated = sets:add_element(Pid, Current),
+                ok = backup_put_sub(Name, Updated),
                 StateA = sput(State0, subs,
-                              maps:put(Name, sets:add_element(Pid, Current),
-                                       sget(State0, subs))),
+                              maps:put(Name, Updated, sget(State0, subs))),
                 ensure_sub_monitor(Pid, StateA)
         end,
     %% Replay an existing registration immediately, whether or not this
@@ -323,8 +452,10 @@ do_unsubscribe(Name, Pid, State) ->
             Updated = sets:del_element(Pid, Current),
             State1 =
                 case sets:size(Updated) of
-                    0 -> sput(State, subs, maps:remove(Name, sget(State, subs)));
-                    _ -> sput(State, subs, maps:put(Name, Updated,
+                    0 -> ok = backup_del_sub(Name),
+                         sput(State, subs, maps:remove(Name, sget(State, subs)));
+                    _ -> ok = backup_put_sub(Name, Updated),
+                         sput(State, subs, maps:put(Name, Updated,
                                                     sget(State, subs)))
                 end,
             maybe_drop_sub_monitor(Pid, State1)
@@ -367,9 +498,11 @@ drop_all_subs_for(Pid, State0) ->
                       Current ->
                           Updated = sets:del_element(Pid, Current),
                           case sets:size(Updated) of
-                              0 -> sput(Acc, subs,
+                              0 -> ok = backup_del_sub(Name),
+                                   sput(Acc, subs,
                                         maps:remove(Name, sget(Acc, subs)));
-                              _ -> sput(Acc, subs,
+                              _ -> ok = backup_put_sub(Name, Updated),
+                                   sput(Acc, subs,
                                         maps:put(Name, Updated,
                                                  sget(Acc, subs)))
                           end
@@ -387,10 +520,10 @@ handle_down(Mon, Reason, State)
   when is_map_key(Mon, map_get(mon_reg, State)) ->
     Name = maps:get(Mon, sget(State, mon_reg)),
     {ok, {_Pid, _Props}} = maps:find(Name, sget(State, regs)),
-    State1 = sput(sput(sput(State,
-                            regs, maps:remove(Name, sget(State, regs))),
-                       reg_mon, maps:remove(Name, sget(State, reg_mon))),
-                  mon_reg, maps:remove(Mon, sget(State, mon_reg))),
+    %% Same teardown path as an explicit unregister (including the
+    %% backup-table row removal); the demonitor of our own just-fired
+    %% monitor with [flush] also swallows the DOWN we are handling.
+    State1 = drop_registration(Name, State),
     State2 = notify_subs(Name, {?SERVER, unregistered, Name, Reason}, State1),
     {noreply, State2};
 handle_down(Mon, _Reason, State)
@@ -401,7 +534,7 @@ handle_down(Mon, _Reason, State)
 handle_down(Mon, _Reason, State)
   when is_map_key(Mon, map_get(callermon_waiter, State)) ->
     {Name, From, TimerRef} = maps:get(Mon, sget(State, callermon_waiter)),
-    erlang:cancel_timer(TimerRef),
+    cancel_waiter_timer(TimerRef),
     State1 = sput(sput(State,
                        timer_waiter,
                        maps:remove(TimerRef, sget(State, timer_waiter))),

@@ -12,18 +12,17 @@ start_link() ->
     supervisor:start_link({local, patchbay_sup}, ?MODULE, []).
 
 init([]) ->
+    %% The registry's backup table is owned HERE, not by the registry
+    %% process: a one_for_one restart of the registry must not destroy
+    %% the very state the fresh instance is about to restore. The table
+    %% dies with this supervisor, i.e. with the whole application -- the
+    %% correct durability scope, since pids recorded in it are
+    %% meaningless across an application or VM restart.
+    _ = ets:new(patchbay_registry_backup,
+                [named_table, public, set, {read_concurrency, true}]),
     SupFlags = #{strategy => one_for_one, intensity => 5, period => 10},
     Children =
-        [%% LIMITATION: `permanent` restarts the registry process on
-         %% crash, but a fresh patchbay_registry has empty state -- every
-         %% registration and subscription is lost, and nothing
-         %% re-registers itself automatically. The tree stays alive
-         %% but every dependency relationship in it goes invisible.
-         %% Acceptable for this bootstrap (the registry is simple
-         %% enough not to crash in practice); revisit once services
-         %% can detect and recover from a registry restart, or the
-         %% registry itself persists/replays its state.
-         #{id => patchbay_registry,
+        [#{id => patchbay_registry,
            start => {patchbay_registry, start_link, []},
            restart => permanent,
            shutdown => 5000,

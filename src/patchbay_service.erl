@@ -44,6 +44,19 @@
          status :: waiting | ready,
          cbstate :: term()}).
 
+-callback service_name() -> atom().
+-callback dependencies() -> [atom()].
+-callback init(Args :: term()) -> {ok, State :: term()}.
+-callback ready(Deps :: #{atom() => pid()}, State :: term()) ->
+    {ok, State :: term()}.
+-callback dep_down(Name :: atom(), Reason :: term(), State :: term()) ->
+    {ok, State :: term()}.
+-callback handle_message(Msg :: term(), State :: term()) ->
+    {ok, State :: term()} | {reply, Reply :: term(), State :: term()}.
+-callback terminate(Reason :: term(), State :: term()) -> ok.
+
+-optional_callbacks([ready/2, dep_down/3, handle_message/2, terminate/2]).
+
 %% ------------------------------------------------------------------
 %% Client API
 %% ------------------------------------------------------------------
@@ -108,7 +121,11 @@ handle_info(_Msg, State) ->
 
 terminate(Reason, State) ->
     call_terminate(State#service.mod, Reason, State#service.cbstate),
-    patchbay_registry:unregister(State#service.name),
+    %% `catch': during shutdown ordering the registry may already be
+    %% gone (noproc) -- nothing left to unregister with, and crashing
+    %% inside terminate would only turn an orderly stop into an error
+    %% report.
+    catch patchbay_registry:unregister(State#service.name),
     ok.
 
 code_change(_OldVsn, State, _Extra) ->
