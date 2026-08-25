@@ -1,0 +1,11 @@
+{application, patchbay,
+ [{description, "Plugin/service runtime core: context, service, registry, dynamic agent supervision"},
+  {vsn, "0.1.0"},
+  {registered, ['patchbay_sup', 'patchbay_registry']},
+  {mod, {'patchbay_app', []}},
+  {applications, [kernel, stdlib]},
+  {env, []},
+  {modules, []},
+  {licenses, ["GPL-3.0-only"]},
+  {links, []}
+ ]}.
