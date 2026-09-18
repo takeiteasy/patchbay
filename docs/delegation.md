@@ -79,15 +79,3 @@ silently colliding with a sibling. Registration, if any, is dropped in
 `terminate/2` after the callback's own disposer runs -- the same ordering
 `patchbay_service` uses, so a dying sub-agent can still notify anyone as its
 last act.
-
-## Worked example
-
-See the fixture agents in the
-[nyaa repo](https://github.com/takeiteasy/nyaa/tree/trunk/test) --
-`test/patchbay-test-echo-agent.lfe`, `test/patchbay-test-crash-agent.lfe`
-and `test/patchbay-test-silent-agent.lfe`, exercised by
-`test/patchbay-agent-tests.lfe` -- covering the cast/call prompt split,
-the done protocol on both paths, crash isolation via the monitor, opt-in
-registration (including the duplicate-name failure and two
-concurrently-named sub-agents of the same module), and the
-optional-callback default for `handle_message/2`.

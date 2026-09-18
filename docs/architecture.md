@@ -8,18 +8,15 @@ supervision trees, message passing, and hot code loading -- rather than a
 mutable Lisp image.
 
 It is written in Erlang with zero non-OTP dependencies, so it works as an
-embedded runtime or plain library anywhere rebar3 does. The agent harness
-built on top of it lives separately at
-[takeiteasy/nyaa](https://github.com/takeiteasy/nyaa) (LFE), which shares
-this project's issue tracker.
+embedded runtime or plain library anywhere rebar3 does.
 
 ## Layering
 
 ```
 ┌─────────────────────────────────────┐
-│  Agent loop (top-level plugin)       │   -- nyaa repo, not yet built
+│  Agent loop (top-level plugin)       │   -- not in patchbay
 ├─────────────────────────────────────┤
-│  Tool / skill plugins                │   -- nyaa repo, not yet built
+│  Tool / skill plugins                │   -- not in patchbay
 │  (shell, fs, http, lisp-eval, ...)   │
 ├─────────────────────────────────────┤
 │  Sub-agent supervisor                │   patchbay_agent,
@@ -61,8 +58,4 @@ sub-agent delegation (`patchbay_agent`, `patchbay_agent_sup` -- see
 process per delegated sub-agent on demand, with crash isolation and a
 tagged done-message protocol for a sub-agent to report back to its parent.
 
-The demo plugin pair proving mount-order independence, dependency-down/
-re-ready transitions, and disposer firing lives in the nyaa repo's test
-suite. Platform-level deferred work (tool/skill plugins, the agent loop,
-the vault, checkpoint/rollback) is tracked on the shared
-`~takeiteasy/nyaa` tracker.
+Deferred work is tracked on the `~takeiteasy/patchbay` tracker.

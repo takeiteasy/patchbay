@@ -34,9 +34,7 @@ callback contract; [docs/architecture.md](docs/architecture.md),
 [docs/registry.md](docs/registry.md), and
 [docs/delegation.md](docs/delegation.md) for how the pieces fit.
 
-The agent harness built on top of patchbay lives at
-[takeiteasy/nyaa](https://github.com/takeiteasy/nyaa), which shares this
-project's issue tracker (`~takeiteasy/nyaa` on sourcehut).
+Issues are tracked at `~takeiteasy/patchbay` on sourcehut.
 
 ## License
 

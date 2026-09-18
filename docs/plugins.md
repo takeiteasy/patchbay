@@ -26,7 +26,7 @@ terminate(Reason, State)      -> ok                              [optional]
 
 `metadata/0` is published as the registration's props (see
 `patchbay_registry:register/3`), which is how plugin *families* advertise
-themselves for discovery -- nyaa's tool/skill plugins use it to publish
+themselves for discovery -- a tool plugin can publish
 `#{kind => tool, summary => ..., params => #{...}}` so callers can find
 every tool by scanning registrations for `kind == tool`.
 
@@ -75,7 +75,7 @@ small and explicit is clearer than another layer of indirection:
 ```lfe
 (defun child_spec (reporter)
   `#m(id demo-provider
-      start #(patchbay_service start_link (nyaa-demo-provider ,reporter))
+      start #(patchbay_service start_link (my-provider ,reporter))
       restart transient
       shutdown 5000
       type worker
@@ -112,10 +112,7 @@ a real bus is better designed once there's a second consumer for it.
 
 ## Worked example
 
-See the demo pair in the
-[nyaa repo](https://github.com/takeiteasy/nyaa/tree/trunk/src/demo) --
-`src/demo/nyaa-demo-provider.lfe` and `src/demo/nyaa-demo-consumer.lfe`,
-a dependency-free provider and a consumer that declares the provider as a
-dependency, exercised by the harness's test suite to prove mount-order
-independence, dependency-down/re-ready transitions, and disposer firing
-on unmount.
+See the test fixtures `test/pb_test_echo_service.erl`, a dependency-free
+provider, and `test/pb_test_consumer_service.erl`, a consumer that
+declares it as a dependency. The service test suites use them to exercise
+dependency-down/re-ready transitions and disposer firing.
